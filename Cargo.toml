@@ -1,0 +1,6 @@
+[package]
+name = "nesasm"
+version = "0.1.0"
+authors = ["clevijoki <clevijoki@gmail.com>"]
+
+[dependencies]
