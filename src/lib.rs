@@ -43,9 +43,7 @@ struct Scope<'a>
     children:Vec<Scope<'a>>,
 }
 
-#[derive(Debug)]
-#[derive(PartialEq)]
-#[derive(Clone)]
+#[derive(Debug, PartialEq, Clone)]
 enum Token<'a>
 {
     Word(&'a str),
@@ -176,38 +174,71 @@ impl<'a> Scope<'a>
     }
 }
 
-enum FlagState
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct FlagState
 {
-    On,
-    Off,
-    Unknown,
+    bits:u8
 }
 
-#[derive(Debug)]
-#[derive(PartialEq)]
-#[derive(Clone)]
-#[derive(Copy)]
-enum ByteValue
+impl FlagState
 {
-    Constant(u8),
-    Unknown,
+    fn on() -> FlagState
+    {
+        FlagState { bits : 2 }
+    }
+
+    fn off() -> FlagState
+    {
+        FlagState { bits : 1 }
+    }
+
+    fn unknown() -> FlagState
+    {
+        FlagState { bits : 3 }
+    }
+}
+
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+struct ByteValue
+{
+    bits:[u64;4],
+}
+
+impl ByteValue
+{
+    fn new(initial:u8) -> ByteValue
+    {
+        let mut bits:[u64;4] = [0,0,0,0];
+
+        let idx = (initial as usize)>>6;
+        let val = 1 << (initial & 0x3f);
+        bits[idx] = val;
+
+        ByteValue { bits }
+    }
+
+    fn unknown() -> ByteValue
+    {
+        ByteValue { bits:[0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff] }
+    }
 }
 
 // represents the state of the CPU when statically analyzing
 struct CPU
 {
+    carry:FlagState,
+    zero:FlagState,
+    interupt_disable:FlagState,
+    decimal_mode:FlagState,
+    brk:FlagState,
     negative:FlagState,
     overflow:FlagState,
-    always_set:FlagState,
-    clear_if_interrupt:FlagState,
-    decimal_mode:FlagState,
-    interupt_disable:FlagState,
-    zero:FlagState,
-    carry:FlagState,
 
     a:ByteValue,
     x:ByteValue,
     y:ByteValue,
+    stack:ByteValue,
 
     memory:[ByteValue;64*1024],
 }
@@ -217,10 +248,11 @@ trait Expression
     fn evaluate(cpu:&mut CPU);
 }
 
-#[derive(Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum OpData
 {
     Unknown,
+    Accumulator,
     Immediate(u8),
     ZeroPage(u8),
     ZeroPageX(u8),
@@ -234,47 +266,30 @@ enum OpData
 
 enum OpCode
 {
+    ADC,
+    AND,
+    ASL,
+    ASR,
     INX,
     INY,
     DEX,
     DEY,
+    EOR,
+    ORA,
     TAX,
     TXA,
     TAY,
     TYA,
+    TSX,
+    TXS,
     LDA,
     LDX,
     LDY,
+    ROR,
+    ROL,
     STA,
     STY,
     STX,
-}
-
-fn add_value(base:ByteValue, val:u8) -> ByteValue
-{
-    match base 
-    {
-        ByteValue::Constant(x) => ByteValue::Constant(x + val),
-        ByteValue::Unknown => ByteValue::Unknown
-    }
-}
-
-fn add_zp_address(base:u8, offset:ByteValue) -> OpData
-{
-    match offset 
-    {
-        ByteValue::Constant(x) => OpData::Absolute((base + x) as u16),
-        ByteValue::Unknown => OpData::Unknown
-    }
-}
-
-fn add_address(base:u16, offset:ByteValue) -> OpData
-{
-    match offset 
-    {
-        ByteValue::Constant(x) => OpData::Absolute(base + (x as u16)),
-        ByteValue::Unknown => OpData::Unknown
-    }
 }
 
 struct Statement
@@ -285,7 +300,12 @@ struct Statement
 
 impl Statement
 {
-    fn new(code:OpCode, data:OpData) -> Statement
+    fn new(code:OpCode) -> Statement
+    {
+        Statement { code, data:OpData::Unknown }
+    }
+
+    fn new_data(code:OpCode, data:OpData) -> Statement
     {
         Statement { code, data }
     }
@@ -309,18 +329,149 @@ impl CPU
     fn new() -> CPU
     {
         CPU { 
-            negative:FlagState::Off, 
-            overflow:FlagState::Off, 
-            always_set:FlagState::Off,
-            clear_if_interrupt:FlagState::Off,
-            decimal_mode:FlagState::Off,
-            interupt_disable:FlagState::Off,
-            zero:FlagState::Off,
-            carry:FlagState::Off,
-            a:ByteValue::Constant(0),
-            x:ByteValue::Constant(0),
-            y:ByteValue::Constant(0),
-            memory:[ByteValue::Constant(0);64*1024] 
+            negative:FlagState::off(), 
+            overflow:FlagState::off(), 
+            brk:FlagState::off(),
+            decimal_mode:FlagState::off(),
+            interupt_disable:FlagState::off(),
+            zero:FlagState::off(),
+            carry:FlagState::off(),
+            a:ByteValue::unknown(),
+            x:ByteValue::unknown(),
+            y:ByteValue::unknown(),
+            stack:ByteValue::unknown(),
+            memory:[ByteValue::unknown();64*1024] 
+        }
+    }
+
+    fn add_value(base:ByteValue, val:ByteValue) -> ByteValue
+    {
+        match base 
+        {
+            ByteValue::Constant(x) => match val 
+            {
+                ByteValue::Constant(y) => ByteValue::Constant(((x as u32) + (y as u32) & 0xff) as u8),
+                ByteValue::Unknown => ByteValue::Unknown,
+            },
+            ByteValue::Unknown => ByteValue::Unknown
+        }
+    }
+
+    fn or_value(base:ByteValue, val:ByteValue) -> ByteValue
+    {
+        match base 
+        {
+            ByteValue::Constant(x) => match val 
+            {
+                ByteValue::Constant(y) => ByteValue::Constant(x | y),
+                ByteValue::Unknown => ByteValue::Unknown,
+            },
+            ByteValue::Unknown => ByteValue::Unknown
+        }
+    }
+
+    fn xor_value(base:ByteValue, val:ByteValue) -> ByteValue
+    {
+        match base 
+        {
+            ByteValue::Constant(x) => match val 
+            {
+                ByteValue::Constant(y) => ByteValue::Constant(x ^ y),
+                ByteValue::Unknown => ByteValue::Unknown,
+            },
+            ByteValue::Unknown => ByteValue::Unknown
+        }
+    }
+
+    fn and_value(base:ByteValue, val:ByteValue) -> ByteValue
+    {
+        match base 
+        {
+            ByteValue::Constant(x) => match val 
+            {
+                ByteValue::Constant(y) => ByteValue::Constant(x & y),
+                ByteValue::Unknown => ByteValue::Unknown,
+            },
+            ByteValue::Unknown => ByteValue::Unknown
+        }
+    }
+
+    fn shl_value(val:ByteValue) -> (ByteValue,FlagState)
+    {
+        match val
+        {
+            ByteValue::Constant(x) => ByteValue::Constant(((x << 1) & 0xff as u8, if x & 0x80 {FlagState::On} else {FlagState::Off}))
+            ByteValue::Unknown => (ByteValue::Unknown, FlagState::Unknown)
+        }
+    }
+
+    fn shr_value(val:ByteValue) -> ByteValue
+    {
+        match val
+        {
+            ByteValue::Constant(x) => ByteValue::Constant(x >> 1),
+            ByteValue::Unknown => ByteValue::Unknown,
+        }
+    }
+
+    // returns new value, carry flag, overflow flag, 
+    fn add_with_carry(base:ByteValue, extra:ByteValue, carry:FlagState) -> (ByteValue,FlagState,FlagState)
+    {
+        if let ByteValue::Constant(base_val) = base
+        {
+            if let ByteValue::Constant(extra_val) = extra
+            {
+                let carry_val = match carry {
+                    FlagState::On => 1,
+                    FlagState::Off => 0,
+                    FlagState::Unknown => return (ByteValue::Unknown,FlagState::Unknown,FlagState::Unknown),
+                };
+
+                let result = base_val as u32 + extra_val as u32 + carry_val;
+
+                return (ByteValue::Constant((result & 0xff) as u8), 
+                    if (result & 0xff) != result { FlagState::On } else { FlagState::Off },
+                    if (base_val & 0x80) == 0 && (extra_val & 0x80) == 0 && (result & 0x80) != 0 { FlagState::On } else { FlagState::Off }
+                    );
+            }
+        }
+
+        return (ByteValue::Unknown, FlagState::Unknown, FlagState::Unknown);
+    }
+
+    fn add_zp_address(base:u8, offset:ByteValue) -> OpData
+    {
+        match offset 
+        {
+            ByteValue::Constant(x) => OpData::Absolute((base + x) as u16),
+            ByteValue::Unknown => OpData::Unknown
+        }
+    }
+
+    fn add_address(base:u16, offset:ByteValue) -> OpData
+    {
+        match offset 
+        {
+            ByteValue::Constant(x) => OpData::Absolute(base + (x as u16)),
+            ByteValue::Unknown => OpData::Unknown
+        }
+    }
+
+    fn get_zero_flag(val:ByteValue) -> FlagState
+    {
+        match val
+        {
+            ByteValue::Constant(x) => if x == 0 { FlagState::On } else { FlagState::Off },
+            ByteValue::Unknown => FlagState::Unknown
+        }
+    }
+
+    fn get_negative_flag(val:ByteValue) -> FlagState
+    {
+        match val
+        {
+            ByteValue::Constant(x) => if (x & 0x80) != 0 { FlagState::On } else { FlagState::Off },
+            ByteValue::Unknown => FlagState::Unknown
         }
     }
 
@@ -354,13 +505,14 @@ impl CPU
         match addr
         {
             OpData::Unknown => ByteValue::Unknown,
+            OpData::Accumulator => self.a,
             OpData::Immediate(val) => ByteValue::Constant(val),
             OpData::ZeroPage(val) => self.memory[val as usize],
-            OpData::ZeroPageX(base) => self.load_value(add_zp_address(base, self.x)),
-            OpData::ZeroPageY(base) => self.load_value(add_zp_address(base, self.y)),
+            OpData::ZeroPageX(base) => self.load_value(CPU::add_zp_address(base, self.x)),
+            OpData::ZeroPageY(base) => self.load_value(CPU::add_zp_address(base, self.y)),
             OpData::Absolute(val) => self.memory[val as usize],
-            OpData::AbsoluteX(base) => self.load_value(add_address(base, self.x)),
-            OpData::AbsoluteY(base) => self.load_value(add_address(base, self.y)),
+            OpData::AbsoluteX(base) => self.load_value(CPU::add_address(base, self.x)),
+            OpData::AbsoluteY(base) => self.load_value(CPU::add_address(base, self.y)),
             // OpData::IndirectX(base) => self.load_indirect(self.x),
             // OpData::IndirectY(base) => self.load_indirect(self.y),
         }
@@ -389,49 +541,117 @@ impl CPU
         match address 
         {
             OpData::Unknown => self.invalidate_memory(),
+            OpData::Accumulator => self.a = val,
             OpData::Immediate(addr) => self.memory[addr as usize] = val,
             OpData::ZeroPage(addr) => self.memory[addr as usize] = val,
-            OpData::ZeroPageX(base) => { let x = self.x.clone(); self.store_value(add_zp_address(base, x), val); },
-            OpData::ZeroPageY(base) => { let y = self.y.clone(); self.store_value(add_zp_address(base, y), val); },
+            OpData::ZeroPageX(base) => { let x = self.x; self.store_value(CPU::add_zp_address(base, x), val); },
+            OpData::ZeroPageY(base) => { let y = self.y; self.store_value(CPU::add_zp_address(base, y), val); },
             OpData::Absolute(addr) => self.memory[addr as usize] = val,
-            OpData::AbsoluteX(base) => { let x = self.x.clone(); self.store_value(add_address(base, x), val); },
-            OpData::AbsoluteY(base) => { let y = self.y.clone(); self.store_value(add_address(base, y), val); },
-            // OpData::IndirectX(base) => { let x = self.x.clone(); self.store_indirect(x, val); },
-            // OpData::IndirectY(base) => { let y = self.y.clone(); self.store_indirect(y, val); },
+            OpData::AbsoluteX(base) => { let x = self.x; self.store_value(CPU::add_address(base, x), val); },
+            OpData::AbsoluteY(base) => { let y = self.y; self.store_value(CPU::add_address(base, y), val); },
+            // OpData::IndirectX(base) => { let x = self.x; self.store_indirect(x, val); },
+            // OpData::IndirectY(base) => { let y = self.y; self.store_indirect(y, val); },
         };
     }
 
     fn evaluate(&mut self, stmt:&Statement)
     {
         match stmt.code {
-            OpCode::INX => self.x = add_value(self.x.clone(), 1),
-            OpCode::DEX => self.x = add_value(self.x.clone(), 0xff),
-            OpCode::INY => self.y = add_value(self.y.clone(), 1),
-            OpCode::DEY => self.y = add_value(self.y.clone(), 0xff),
-            OpCode::TAX => self.x = add_value(self.a.clone(), 0),
-            OpCode::TAY => self.y = add_value(self.a.clone(), 0),
-            OpCode::TXA => self.a = add_value(self.x.clone(), 0),
-            OpCode::TYA => self.a = add_value(self.y.clone(), 0),
+            OpCode::ADC =>
+            {
+                let mem = self.load_value(stmt.data.clone());
+                let (a, carry, overflow) = CPU::add_with_carry(self.a, mem, self.carry);
+                self.a = a;
+                self.carry = carry;
+                self.overflow = overflow;
+                self.zero = CPU::get_zero_flag(self.a);
+                self.negative = CPU::get_negative_flag(self.a);
+            },
+            OpCode::AND =>
+            {
+                let mem = self.load_value(stmt.data.clone());
+                self.a = CPU::and_value(self.a, mem);
+                self.zero = CPU::get_zero_flag(self.a);
+                self.negative = CPU::get_negative_flag(self.a);
+            },
+            OpCode::ASL =>
+            {
+                let mem = self.load_value(stmt.data);
+                self.a = CPU::shl_value(mem);
+                self.zero = CPU::get_zero_flag(self.a);
+                self.negative = CPU::get_negative_flag(self.a);
+            },
+            OpCode::ASR =>
+            {
+                let mem = self.load_value(stmt.data);
+                self.a = CPU::shr_value(mem);
+                self.zero = CPU::get_zero_flag(self.a);
+                self.negative = CPU::get_negative_flag(self.a);
+            },
+            OpCode::ORA =>
+            {
+                let mem = self.load_value(stmt.data.clone());
+                self.a = CPU::or_value(self.a, mem);
+                self.zero = CPU::get_zero_flag(self.a);
+                self.negative = CPU::get_negative_flag(self.a);
+            },
+            OpCode::EOR =>
+            {
+                let mem = self.load_value(stmt.data.clone());
+                self.a = CPU::xor_value(self.a, mem);
+                self.zero = CPU::get_zero_flag(self.a);
+                self.negative = CPU::get_negative_flag(self.a);
+            },
+            OpCode::INX => 
+            { 
+                self.x = CPU::add_value(self.x, ByteValue::Constant(1)); 
+                self.zero = CPU::get_zero_flag(self.x);
+                self.negative = CPU::get_negative_flag(self.x);
+            }, 
+            OpCode::DEX => 
+            {
+                self.x = CPU::add_value(self.x, ByteValue::Constant(0xff));
+                self.zero = CPU::get_zero_flag(self.x);
+                self.negative = CPU::get_negative_flag(self.x);
+            },
+            OpCode::INY =>
+            {
+                self.y = CPU::add_value(self.y, ByteValue::Constant(1));
+                self.zero = CPU::get_zero_flag(self.y);
+                self.negative = CPU::get_negative_flag(self.y);
+            },
+            OpCode::DEY =>
+            {
+                self.y = CPU::add_value(self.y, ByteValue::Constant(0xff));
+                self.zero = CPU::get_zero_flag(self.y);
+                self.negative = CPU::get_negative_flag(self.y);
+            } 
+            OpCode::TAX => self.x = self.a,
+            OpCode::TAY => self.y = self.a,
+            OpCode::TXA => self.a = self.x,
+            OpCode::TYA => self.a = self.y,
+            OpCode::TSX => self.x = self.stack,
+            OpCode::TXS => self.stack = self.x,
             OpCode::LDA => self.a = self.load_value(stmt.data.clone()),
             OpCode::LDX => self.x = self.load_value(stmt.data.clone()),
             OpCode::LDY => self.y = self.load_value(stmt.data.clone()),
             OpCode::STA => 
             { 
                 let data = stmt.data.clone(); 
-                let a_val = self.a.clone();
+                let a_val = self.a;
 
                 self.store_value(data, a_val); 
             },
             OpCode::STX => 
             { 
                 let data = stmt.data.clone(); 
-                let x_val = self.x.clone(); 
+                let x_val = self.x; 
                 self.store_value(data, x_val);
             },
             OpCode::STY => 
             {
                 let data = stmt.data.clone();
-                let y_val = self.y.clone();
+                let y_val = self.y;
                 self.store_value(data, y_val);
             },
         };
@@ -502,51 +722,222 @@ mod tests
     }
 
     #[test]
-    fn eval_inx()
+    fn eval_inc_registers()
     {
-        let mut program = Program::new();
-
-        program.statements = vec![Statement::new(OpCode::INX, OpData::Unknown)];
-
         let mut cpu = CPU::new();
-        assert_eq!(ByteValue::Constant(0), cpu.x);
+        cpu.x = ByteValue::Constant(0);
+        cpu.y = ByteValue::Constant(0xff);
 
-        cpu.run(&program);
+        cpu.evaluate(&Statement::new(OpCode::INX));
+
+        assert_eq!(ByteValue::Constant(1), cpu.x);
+        assert_eq!(ByteValue::Constant(0xff), cpu.y);
+        assert_eq!(FlagState::Off, cpu.zero);
+
+        cpu.evaluate(&Statement::new(OpCode::INY));
+
         assert_eq!(ByteValue::Constant(1), cpu.x);
         assert_eq!(ByteValue::Constant(0), cpu.y);
-        assert_eq!(ByteValue::Constant(0), cpu.a);
+        assert_eq!(FlagState::On, cpu.zero);
+
+        assert_eq!(ByteValue::Unknown, cpu.a);
     }
 
     #[test]
-    fn eval_iny()
+    fn eval_dec_registers()
     {
-        let mut program = Program::new();
-
-        program.statements = vec![Statement::new(OpCode::INY, OpData::Unknown)];
-
         let mut cpu = CPU::new();
-        assert_eq!(ByteValue::Constant(0), cpu.y);
+        cpu.x = ByteValue::Constant(2);
+        cpu.y = ByteValue::Constant(1);
 
-        cpu.run(&program);
-        assert_eq!(ByteValue::Constant(0), cpu.x);
+        cpu.evaluate(&Statement::new(OpCode::DEX));
+
+        assert_eq!(ByteValue::Unknown, cpu.a);
+        assert_eq!(ByteValue::Constant(1), cpu.x);
         assert_eq!(ByteValue::Constant(1), cpu.y);
-        assert_eq!(ByteValue::Constant(0), cpu.a);
+        assert_eq!(FlagState::Off, cpu.zero);
+
+        cpu.evaluate(&Statement::new(OpCode::DEY));
+
+        assert_eq!(ByteValue::Unknown, cpu.a);
+        assert_eq!(ByteValue::Constant(1), cpu.x);
+        assert_eq!(ByteValue::Constant(0), cpu.y);
+        assert_eq!(FlagState::On, cpu.zero);
+
+        cpu.evaluate(&Statement::new(OpCode::DEX));
+
+        assert_eq!(ByteValue::Unknown, cpu.a);
+        assert_eq!(ByteValue::Constant(0), cpu.x);
+        assert_eq!(ByteValue::Constant(0), cpu.y);
+        assert_eq!(FlagState::On, cpu.zero);
     }
 
     #[test]
-    fn eval_lda_immediate()
+    fn eval_transfer()
+    {
+        let mut cpu = CPU::new();
+        cpu.a = ByteValue::Constant(42);
+
+        assert_eq!(ByteValue::Unknown, cpu.x);
+        assert_eq!(ByteValue::Unknown, cpu.y);
+        assert_eq!(ByteValue::Unknown, cpu.stack);
+
+        cpu.evaluate(&Statement::new(OpCode::TAX));
+        assert_eq!(ByteValue::Constant(42), cpu.a);
+        assert_eq!(ByteValue::Constant(42), cpu.x);
+        assert_eq!(ByteValue::Unknown, cpu.y);
+        assert_eq!(ByteValue::Unknown, cpu.stack);
+
+        cpu.evaluate(&Statement::new(OpCode::TAY));
+        assert_eq!(ByteValue::Constant(42), cpu.a);
+        assert_eq!(ByteValue::Constant(42), cpu.x);
+        assert_eq!(ByteValue::Constant(42), cpu.y);
+        assert_eq!(ByteValue::Unknown, cpu.stack);
+
+        cpu.evaluate(&Statement::new(OpCode::TXS));
+        assert_eq!(ByteValue::Constant(42), cpu.a);
+        assert_eq!(ByteValue::Constant(42), cpu.x);
+        assert_eq!(ByteValue::Constant(42), cpu.y);
+        assert_eq!(ByteValue::Constant(42), cpu.stack);
+
+        cpu.stack = ByteValue::Constant(17);
+
+        cpu.evaluate(&Statement::new(OpCode::TSX));
+        assert_eq!(ByteValue::Constant(42), cpu.a);
+        assert_eq!(ByteValue::Constant(17), cpu.x);
+        assert_eq!(ByteValue::Constant(42), cpu.y);
+        assert_eq!(ByteValue::Constant(17), cpu.stack);
+
+        cpu.evaluate(&Statement::new(OpCode::TXA));
+        assert_eq!(ByteValue::Constant(17), cpu.a);
+        assert_eq!(ByteValue::Constant(17), cpu.x);
+        assert_eq!(ByteValue::Constant(42), cpu.y);
+        assert_eq!(ByteValue::Constant(17), cpu.stack);
+
+        cpu.evaluate(&Statement::new(OpCode::TYA));
+        assert_eq!(ByteValue::Constant(42), cpu.a);
+        assert_eq!(ByteValue::Constant(17), cpu.x);
+        assert_eq!(ByteValue::Constant(42), cpu.y);
+        assert_eq!(ByteValue::Constant(17), cpu.stack);
+    }
+
+    #[test]
+    fn eval_and()
+    {
+        let mut cpu = CPU::new();
+
+        cpu.a = ByteValue::Constant(0xAA);
+
+        cpu.evaluate(&Statement::new_data(OpCode::AND, OpData::Immediate(0xf)));
+
+        assert_eq!(ByteValue::Constant(0x0f & 0xAA), cpu.a);
+
+        cpu.evaluate(&Statement::new_data(OpCode::AND, OpData::Immediate(0xf0)));
+
+        assert_eq!(ByteValue::Constant(0), cpu.a);
+        assert_eq!(FlagState::On, cpu.zero);
+    }
+
+    #[test]
+    fn eval_or()
+    {
+        let mut cpu = CPU::new();
+
+        cpu.a = ByteValue::Constant(0xAA);
+
+        cpu.evaluate(&Statement::new_data(OpCode::ORA, OpData::Immediate(0xf)));
+
+        assert_eq!(ByteValue::Constant(0x0f | 0xAA), cpu.a);
+
+        cpu.evaluate(&Statement::new_data(OpCode::ORA, OpData::Immediate(0xf0)));
+
+        assert_eq!(ByteValue::Constant(0xff), cpu.a);
+        assert_eq!(FlagState::Off, cpu.zero);
+
+        cpu.a = ByteValue::Constant(0);
+        cpu.evaluate(&Statement::new_data(OpCode::ORA, OpData::Immediate(0)));
+
+        assert_eq!(ByteValue::Constant(0), cpu.a);
+        assert_eq!(FlagState::On, cpu.zero);
+    }
+
+    #[test]
+    fn eval_xor()
+    {
+        let mut cpu = CPU::new();
+
+        cpu.a = ByteValue::Constant(0xAA);
+
+        cpu.evaluate(&Statement::new_data(OpCode::EOR, OpData::Immediate(0xf)));
+
+        assert_eq!(ByteValue::Constant(0x0f ^ 0xAA), cpu.a);
+
+        cpu.evaluate(&Statement::new_data(OpCode::EOR, OpData::Immediate(0xf0)));
+
+        assert_eq!(ByteValue::Constant(0x55), cpu.a);
+        assert_eq!(FlagState::Off, cpu.zero);
+
+        cpu.evaluate(&Statement::new_data(OpCode::EOR, OpData::Immediate(0x55)));
+
+        assert_eq!(ByteValue::Constant(0), cpu.a);
+        assert_eq!(FlagState::On, cpu.zero);
+    }
+
+    #[test]
+    fn eval_shl()
+    {
+        let mut cpu = CPU::new();
+
+        cpu.a = ByteValue::Constant(0xAA);
+        cpu.memory[42] = ByteValue::Constant(42);
+        cpu.memory[0x1000] = ByteValue::Constant(13);
+
+        cpu.evaluate(&Statement::new_data(OpCode::ROL, OpData::Accumulator));
+        assert_eq!(ByteValue::Constant(0xAA << 1), cpu.a);
+        
+        cpu.evaluate(&Statement::new_data(OpCode::ROL, OpData::ZeroPage(42)));
+        assert_eq!(ByteValue::Constant(0x42 << 1), cpu.memory[42]);
+        
+        cpu.evaluate(&Statement::new_data(OpCode::ROL, OpData::Absolute(0x1000)));
+        assert_eq!(ByteValue::Constant(13 << 1), cpu.memory[0x1000]);
+    }
+
+    #[test]
+    fn eval_shr()
+    {
+        let mut cpu = CPU::new();
+
+        cpu.a = ByteValue::Constant(0xAA);
+        cpu.memory[42] = ByteValue::Constant(42);
+        cpu.memory[0x1000] = ByteValue::Constant(13);
+
+        cpu.evaluate(&Statement::new_data(OpCode::ROR, OpData::Accumulator));
+        assert_eq!(ByteValue::Constant(0xAA >> 1), cpu.a);
+        
+        cpu.evaluate(&Statement::new_data(OpCode::ROR, OpData::ZeroPage(42)));
+        assert_eq!(ByteValue::Constant(0x42 >> 1), cpu.memory[42]);
+        
+        cpu.evaluate(&Statement::new_data(OpCode::ROR, OpData::Absolute(0x1000)));
+        assert_eq!(ByteValue::Constant(13 >> 1), cpu.memory[0x1000]);
+    }
+
+
+    #[test]
+    fn eval_load_immediate()
     {
         let mut program = Program::new();
 
-        program.statements = vec![Statement::new(OpCode::LDA, OpData::Immediate(42))];
+        program.statements = vec![
+            Statement::new_data(OpCode::LDA, OpData::Immediate(42)),
+            Statement::new_data(OpCode::LDX, OpData::Immediate(43)),
+            Statement::new_data(OpCode::LDY, OpData::Immediate(44))];
 
         let mut cpu = CPU::new();
-        assert_eq!(ByteValue::Constant(0), cpu.a);
 
         cpu.run(&program);
-        assert_eq!(ByteValue::Constant(0), cpu.x);
-        assert_eq!(ByteValue::Constant(0), cpu.y);
         assert_eq!(ByteValue::Constant(42), cpu.a);
+        assert_eq!(ByteValue::Constant(43), cpu.x);
+        assert_eq!(ByteValue::Constant(44), cpu.y);
 
     }
 
@@ -556,17 +947,15 @@ mod tests
         let mut program = Program::new();
 
 
-        program.statements = vec![Statement::new(OpCode::LDA, OpData::ZeroPage(42))];
+        program.statements = vec![Statement::new_data(OpCode::LDA, OpData::ZeroPage(42))];
 
         let mut cpu = CPU::new();
         cpu.memory[42] = ByteValue::Constant(17);
-
-        assert_eq!(ByteValue::Constant(0), cpu.a);
+        cpu.a = ByteValue::Constant(0);
 
         cpu.run(&program);
-        assert_eq!(ByteValue::Constant(0), cpu.x);
-        assert_eq!(ByteValue::Constant(0), cpu.y);
+        assert_eq!(ByteValue::Unknown, cpu.x);
+        assert_eq!(ByteValue::Unknown, cpu.y);
         assert_eq!(ByteValue::Constant(17), cpu.a);
-
     }
 }
